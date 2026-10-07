@@ -1,43 +1,12 @@
-// @ts-nocheck
-/// <reference types="chrome" />
-
-chrome.webRequest.onBeforeSendHeaders.addListener(
-  (details) => {
-    chrome.storage.local.set({
-      ["req_" + details.requestId]: {
-        url: details.url,
-        method: details.method,
-        requestHeaders: details.requestHeaders
-      }
-    });
-
-    return undefined;
-  },
-  { urls: ["<all_urls>"] },
-  ["requestHeaders"]
-);
-
-chrome.webRequest.onCompleted.addListener(
-  (details) => {
-    const key = "req_" + details.requestId;
-
-    chrome.storage.local.get(key, (req) => {
-      const data = /** @type {any} */ (req[key]);
-      if (!data) return;
-
-      const apiData = {
-        url: data.url,
-        method: data.method,
-        status: details.statusCode,
-        requestHeaders: data.requestHeaders
-      };
-
-      chrome.storage.local.set({
-        ["api_" + details.requestId]: apiData
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.storage.local.get(null, items => {
+    if (chrome.runtime.lastError) return;
+    const obsoleteKeys = Object.keys(items).filter(key => /^(req_|api_)/.test(key));
+    if (obsoleteKeys.length) {
+      chrome.storage.local.remove(obsoleteKeys, () => {
+        const error = chrome.runtime.lastError;
+        if (error) console.warn('J-Spy: old records could not be removed:', error.message);
       });
-    });
-
-    return undefined;
-  },
-  { urls: ["<all_urls>"] }
-);
+    }
+  });
+});

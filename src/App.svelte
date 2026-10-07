@@ -1,95 +1,75 @@
-<script lang="ts">
-  import JSONTree from 'svelte-json-tree'; // 追加
-  
-  // --- 1. 状態管理 ($state) ---
-  // $state を使うことで、変数の値が変わると画面が自動更新されます
-  let apis = $state([]);         // 通信リストの配列
-  let selected = $state(null);   // 現在選択中の通信データ
-  let cookieString = $state(""); // 表示用のクッキー文字列
+<script>
+  import { onMount } from 'svelte';
+  import JSONTree from '@sveltejs/svelte-json-tree';
+  import { createNetworkMonitor, createCookieLoader } from './lib/monitor.js';
 
-  // --- 2. Chrome API による通信監視 ---
-    if (typeof chrome !== 'undefined' && chrome.devtools) {
-      chrome.devtools.network.onRequestFinished.addListener((request) => {
-        const currentUrl = request.request.url;
-        const mimeType = request.response.content.mimeType || "";
+  let apis = $state([]);
+  let selected = $state(null);
+  let cookieResult = $state({ cookies: [], state: 'ready', error: '' });
+  let monitor;
+  const chromeApi = typeof chrome === 'undefined' ? undefined : chrome;
+  const isPreview = import.meta.env.DEV && !chromeApi?.devtools?.network;
+  let active = true;
+  const cookieLoader = createCookieLoader(chromeApi, result => { cookieResult = result; });
 
-        // 【修正】JSONデータかどうかだけを判定
-        // application/json だけでなく、text/json や application/vnd.api+json などもカバー
-        const isJson = mimeType.toLowerCase().includes('json');
-
-        // JSONでなければその時点で終了（静的ファイルの判定も不要になります）
-        if (!isJson) return;
-
-      // 表示用のデータオブジェクトを作成
-      const newEntry = {
-        id: crypto.randomUUID(),
-        url: currentUrl,
-        method: request.request.method,
-        status: request.response.status,
-        mimeType: mimeType,
-        time: Math.round(request.time),
-        requestBody: request.request.postData ? request.request.postData.text : null,
-        body: null 
-      };
-
-      // リクエストBodyがJSONならオブジェクトに変換
-      if (newEntry.requestBody) {
-        try { newEntry.requestBody = JSON.parse(newEntry.requestBody); } catch (e) {}
-      }
-
-      // レスポンスBodyを取得
-      request.getContent((content) => {
-        if (!content) return;
-
-        let finalData = content;
-        
-        try {
-          // 1回目のパース
-          finalData = JSON.parse(content);
-          
-          // 【ここが重要】もしパース結果がまだ「文字列」で、かつJSONっぽいなら、もう一度パースする
-          if (typeof finalData === 'string') {
-            const trimmed = finalData.trim();
-            if (trimmed.startsWith('{') || trimmed.startsWith('[')) {
-              finalData = JSON.parse(trimmed);
-            }
-          }
-        } catch (e) {
-          // パース失敗時は元のコンテンツのまま
-          finalData = content;
-        }
-
-        // 状態を更新
-        apis = apis.map(api => 
-          api.id === newEntry.id ? { ...api, body: finalData } : api
-        );
-        if (selected && selected.id === newEntry.id) {
-          selected = { ...selected, body: finalData };
-        }
-      });
-
-      // 【状態更新】配列の先頭に追加。Svelteがこれを検知してリストを再描画
-      apis = [newEntry, ...apis];
-      if (apis.length > 100) apis = apis.slice(0, 100); // 100件制限
-    });
+  async function loadSamples() {
+    if (!isPreview) return;
+    const { createPreviewEntries } = await import('./lib/preview.js');
+    if (!active) return;
+    backToList();
+    apis = createPreviewEntries();
   }
 
-  // --- 3. 補助関数 ---
-  // URLからファイル名やエンドポイント名を抽出
+  onMount(() => {
+    active = true;
+    if (isPreview) {
+      void loadSamples();
+      return () => { active = false; cookieLoader.cancel(); };
+    }
+    monitor = createNetworkMonitor(chromeApi,
+      entry => { apis = [entry, ...apis].slice(0, 100); },
+      (id, result) => {
+        apis = apis.map(api => api.id === id ? { ...api, ...result } : api);
+        if (selected?.id === id) selected = { ...selected, ...result };
+      });
+    return () => { active = false; monitor.destroy(); cookieLoader.cancel(); };
+  });
+
   function getApiName(url) {
     try {
-      const urlObj = new URL(url);
-      const parts = urlObj.pathname.split('/').filter(p => p);
-      return parts.length > 0 ? parts[parts.length - 1] : urlObj.hostname;
+      const parsed = new URL(url);
+      return parsed.pathname.split('/').filter(Boolean).at(-1) || parsed.hostname;
     } catch { return url; }
   }
 
-  // 詳細画面を表示し、そのURLに関連するクッキーを取得
+  function getStatusLabel(status) {
+    if (status >= 200 && status < 300) return 'Success';
+    if (status >= 300 && status < 400) return 'Redirect';
+    if (status >= 400 && status < 500) return 'Client error';
+    if (status >= 500 && status < 600) return 'Server error';
+    if (status >= 100 && status < 200) return 'Informational';
+    return 'Unknown';
+  }
+
   function showDetail(api) {
     selected = api;
-    chrome.cookies.getAll({ url: api.url }, (cookies) => {
-      cookieString = cookies.map(c => `${c.name}=${c.value}`).join("; ");
-    });
+    if (isPreview) {
+      cookieResult = { cookies: api.previewCookies || [], state: 'ready', error: '' };
+    } else {
+      cookieLoader.load(api.url);
+    }
+  }
+
+  function backToList() {
+    cookieLoader.cancel();
+    cookieResult = { cookies: [], state: 'ready', error: '' };
+    selected = null;
+  }
+
+  function clearAll() {
+    monitor?.clear();
+    apis = [];
+    backToList();
   }
 </script>
 
@@ -98,78 +78,91 @@
     <div class="header-left">
       <span class="title">J-Spy</span>
       <span class="count">{apis.length} items</span>
+      {#if isPreview}<span class="preview-badge">SAMPLE DATA</span>{/if}
     </div>
-    <button class="clear-btn" onclick={() => {apis = []; selected = null;}}>Clear All</button>
+    <div class="header-actions">
+      {#if isPreview}<button class="clear-btn" onclick={loadSamples}>Reset Samples</button>{/if}
+      <button class="clear-btn danger" onclick={clearAll}>Clear All</button>
+    </div>
   </header>
 
   <main class="content">
     {#if !selected}
       <div class="list-container">
-        <div class="list-head">...</div>
+        <div class="list-head" aria-hidden="true">
+          <span>Method</span><span>Endpoint</span><span>Status</span><span class="align-right">Time</span>
+        </div>
         <div class="list-body">
           {#each apis as api (api.id)}
             <button class="row" onclick={() => showDetail(api)}>
               <div class="col-method">
-                <span class="method-tag {api.method}">{api.method}</span>
+                <span class="method-tag" data-method={api.method}>{api.method}</span>
               </div>
               <div class="col-main">
-                <div class="primary-text">{getApiName(api.url)}</div>
-                <div class="secondary-text">{api.url}</div>
+                <div class="primary-text" title={getApiName(api.url)}>{getApiName(api.url)}</div>
+                <div class="secondary-text" title={api.url}>{api.url}</div>
               </div>
               <div class="col-status">
                 <span class="status-num" data-status={api.status}>{api.status}</span>
-                <span class="time-text">{api.time}ms</span>
+                <span class="status-label">{getStatusLabel(api.status)}</span>
               </div>
+              <span class="time-text">{api.time} ms</span>
             </button>
           {:else}
-            <div class="empty-msg">No activity. Please reload the page.</div>
+            <div class="empty-msg">
+              <span class="empty-title">No JSON requests yet</span>
+              <span>{isPreview ? 'Use Reset Samples to restore the preview.' : 'Reload the page or perform an action to capture JSON requests.'}</span>
+            </div>
           {/each}
         </div>
       </div>
     {:else}
       <div class="detail-view">
         <div class="detail-toolbar">
-          <button class="back-btn" onclick={() => (selected = null)}>← BACK TO LIST</button>
+          <button class="back-btn" onclick={backToList}>← Back to requests</button>
         </div>
 
         <div class="detail-scroll">
           <section>
-            <div class="label">ENDPOINT</div>
+            <h2 class="label">Request</h2>
+            <div class="endpoint-meta">
+              <span class="method-tag" data-method={selected.method}>{selected.method}</span>
+              <span class="col-status"><span class="status-num" data-status={selected.status}>{selected.status}</span><span class="status-label">{getStatusLabel(selected.status)}</span></span>
+              <span class="time-text">{selected.time} ms</span>
+            </div>
             <div class="url-display">{selected.url}</div>
           </section>
 
           <section>
-            <div class="label" style="color: #4caf50; border-left-color: #4caf50;">RESPONSE BODY</div>
+            <h2 class="label">Response body <span class="section-meta">JSON</span></h2>
             <div class="code-container tree-mode">
-              {#if selected.body}
-                {@const displayData = (typeof selected.body === 'string' && (selected.body.trim().startsWith('{') || selected.body.trim().startsWith('['))) 
-                  ? JSON.parse(selected.body) 
-                  : selected.body}
-
-                <span style="font-size: 10px; color: #444; margin-bottom: 5px; display: block;">
-                  Detected Type: {Array.isArray(displayData) ? 'Array' : typeof displayData}
-                </span>
-
-                {#if typeof displayData === 'object' && displayData !== null}
-                  <JSONTree value={displayData} defaultExpandedLevel={1} />
-                {:else}
-                  <pre><code style="color: #dcdcaa;">{displayData}</code></pre>
-                {/if}
+              {#if selected.bodyState === 'loading'}
+                <div class="no-data">Loading response...</div>
+              {:else if selected.bodyState === 'error'}
+                <div class="no-data">Could not load response: {selected.bodyError}</div>
+              {:else if selected.bodyState === 'empty'}
+                <div class="no-data">No response body.</div>
+              {:else if typeof selected.body === 'object' && selected.body !== null}
+                <JSONTree value={selected.body} defaultExpandedLevel={1} />
               {:else}
-                <div class="no-data">Loading or no response data...</div>
+                <pre><code>{typeof selected.body === 'string' ? selected.body : JSON.stringify(selected.body)}</code></pre>
               {/if}
             </div>
           </section>
 
           <section>
-            <div class="label">COOKIES</div>
+            <h2 class="label">Cookies <span class="section-meta">{cookieResult.state === 'ready' ? cookieResult.cookies.length + ' for this URL' : 'For this URL'}</span></h2>
             <div class="cookie-list">
-              {#if cookieString}
-                {#each cookieString.split('; ') as cookie}
-                  <div class="cookie-item">{cookie}</div>
-                {/each}
+              {#if cookieResult.state === 'loading'}
+                <div class="no-data">Loading cookies...</div>
+              {:else if cookieResult.state === 'error'}
+                <div class="no-data">Could not load cookies: {cookieResult.error}</div>
               {:else}
-                <div class="no-data">No cookies found for this domain.</div>
+                {#each cookieResult.cookies as cookie}
+                  <div class="cookie-item"><span class="cookie-name">{cookie.name}</span><span class="cookie-value">{cookie.value}</span></div>
+                {:else}
+                  <div class="no-data">No cookies found for this URL.</div>
+                {/each}
               {/if}
             </div>
           </section>
@@ -180,79 +173,92 @@
 </div>
 
 <style>
-  /* スタイルは変更なし（そのまま維持） */
-  /* --- グローバルリセット --- */
-  :global(html, body) {
-    margin: 0 !important;
-    padding: 0 !important;
-    background-color: #000000 !important;
-    color: #ffffff !important;
-    font-family: 'Consolas', 'Monaco', monospace;
-    overflow: hidden;
-    text-align: left !important;
-  }
-
-  .api-checker-root { display: flex; flex-direction: column; height: 100vh; width: 100vw; background: #000; }
-  .header { display: flex; justify-content: space-between; align-items: center; padding: 8px 12px; background: #111; border-bottom: 1px solid #333; }
-  .title { font-weight: bold; color: #fff; font-size: 14px; margin-right: 12px; }
-  .count { color: #666; font-size: 11px; }
-  .clear-btn { background: transparent; border: 1px solid #444; color: #ccc; font-size: 10px; padding: 4px 8px; cursor: pointer; }
-  .clear-btn:hover { background: #cc0000; color: white; border-color: #cc0000; }
-  .content { flex: 1; overflow: hidden; display: flex; flex-direction: column; width: 100%; }
-  .list-container { display: flex; flex-direction: column; height: 100%; width: 100%; }
-  .list-head { display: flex; background: #1a1a1a; color: #888; font-size: 11px; padding: 8px 12px; border-bottom: 1px solid #333; }
-  .list-body { flex: 1; overflow-y: auto; }
-  .row { display: flex; width: 100%; background: transparent; border: none; border-bottom: 1px solid #222; padding: 10px 12px; text-align: left; cursor: pointer; align-items: center; color: #fff; }
-  .row:hover { background: #111; }
-  .col-method { width: 70px; flex-shrink: 0; }
-  .col-main { flex: 1; min-width: 0; padding-right: 10px; }
-  .col-status { width: 90px; text-align: right; flex-shrink: 0; }
-  .method-tag { font-size: 10px; font-weight: bold; padding: 2px 5px; border-radius: 2px; }
-  .GET { color: #4caf50; border: 1px solid #4caf50; }
-  .POST { color: #2196f3; border: 1px solid #2196f3; }
-  .primary-text { font-weight: bold; font-size: 13px; color: #eee; margin-bottom: 3px; }
-  .secondary-text { font-size: 11px; color: #666; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .status-num { font-weight: bold; font-size: 12px; margin-right: 8px; }
-  .status-num[data-status^="2"] { color: #4caf50; }
-  .status-num[data-status^="4"], .status-num[data-status^="5"] { color: #f44336; }
-  .time-text { color: #444; font-size: 10px; }
-  .detail-view { display: flex; flex-direction: column; height: 100%; background: #000; }
-  .detail-toolbar { padding: 10px; border-bottom: 1px solid #333; }
-  .back-btn { background: #222; border: 1px solid #444; color: #fff; padding: 6px 12px; cursor: pointer; font-size: 11px; }
-  .detail-scroll { flex: 1; overflow-y: auto; padding: 15px; }
-  section { margin-bottom: 25px; }
-  .label { font-size: 11px; color: #666; font-weight: bold; margin-bottom: 8px; border-left: 3px solid #333; padding-left: 8px; }
-  .url-display { font-size: 12px; color: #2196f3; word-break: break-all; }
-  .code-container pre { background: #0a0a0a; border: 1px solid #222; padding: 12px; border-radius: 4px; overflow-x: auto; margin: 0; }
-  code { font-size: 12px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; }
-  .cookie-list { display: flex; flex-direction: column; gap: 5px; }
-  .cookie-item { background: #111; padding: 6px 10px; border-radius: 3px; font-size: 11px; color: #ccc; border: 1px solid #222; word-break: break-all; }
-  .empty-msg, .no-data { padding: 40px; text-align: left; color: #444; font-size: 12px; }
-  /* JSONツリーをモノトーン基調に設定 */
-  .code-container.tree-mode {
-    background: #0a0a0a;
-    padding: 12px;
-    border: 1px solid #222;
-    border-radius: 4px;
-    
-    --json-tree-font-family: 'Consolas', monospace;
-    --json-tree-font-size: 13px;
-    --json-tree-bg: transparent;
-
-    /* --- 配色のカスタマイズ（モノトーン＋α） --- */
-    --json-tree-label-color: #666666;      /* 矢印や記号（控えめなグレー） */
-    --json-tree-property-color: #ffffff;   /* キー名 (白：一番目立たせる) */
-    
-    /* 値は少しトーンを落として、キー名と区別をつける */
-    --json-tree-string-color: #aaaaaa;    /* 文字列 (明るいグレー) */
-    --json-tree-number-color: #aaaaaa;    /* 数値 (グレー) */
-    --json-tree-boolean-color: #aaaaaa;   /* 真偽値 (グレー) */
-    --json-tree-null-color: #666666;      /* null (暗めのグレー) */
-    --json-tree-undefined-color: #666666; /* undefined */
-  }
-
-  /* 選択中の行をわずかに浮かび上がらせる */
-  :global(.json-tree-pair:hover) {
-    background-color: rgba(255, 255, 255, 0.03) !important;
-  }
+:global(html) { color-scheme: dark; }
+:global(html, body) { margin: 0; padding: 0; background: #111820; color: #edf2f7; font-family: system-ui, -apple-system, 'Segoe UI', 'Meiryo', sans-serif; overflow: hidden; text-align: left; }
+:global(body *) { box-sizing: border-box; }
+.api-checker-root {
+  --bg: #111820; --surface: #18222e; --hover: #223244;
+  --text: #edf2f7; --muted: #aab8c8; --line: #334457;
+  --accent: #96c8ff; --success: #86d9af; --warning: #ffd38a; --danger: #ffb0b6;
+  --mono: 'Cascadia Code', Consolas, Monaco, monospace;
+  display: flex; flex-direction: column; height: 100dvh; width: 100%; background: var(--bg); font-size: 14px; line-height: 1.5;
+}
+.header { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; padding: 14px 20px; background: var(--surface); border-bottom: 1px solid var(--line); }
+.header-left, .header-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.title { font-size: 18px; font-weight: 700; letter-spacing: -.02em; }
+.count { color: var(--muted); font-size: 13px; border-left: 1px solid var(--line); padding-left: 12px; font-variant-numeric: tabular-nums; }
+.preview-badge { color: var(--warning); background: #302b20; border: 1px solid #78613c; border-radius: 4px; padding: 2px 7px; font-size: 11px; font-weight: 600; letter-spacing: .04em; }
+.clear-btn, .back-btn { min-height: 36px; border: 1px solid #687d94; border-radius: 6px; background: transparent; color: var(--text); font: inherit; font-size: 13px; font-weight: 500; padding: 6px 12px; cursor: pointer; }
+.clear-btn:hover, .back-btn:hover { background: var(--hover); border-color: var(--accent); }
+.clear-btn.danger:hover { color: var(--danger); border-color: var(--danger); background: #34242e; }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.content, .list-container, .detail-view { display: flex; flex-direction: column; min-height: 0; flex: 1; }
+.content { overflow: hidden; }
+.list-head, .row { display: grid; grid-template-columns: 72px minmax(0, 1fr) 132px 84px; align-items: center; gap: 16px; padding: 12px 20px; }
+.list-head { flex-shrink: 0; color: var(--muted); background: var(--surface); font-size: 12px; font-weight: 600; border-bottom: 1px solid var(--line); }
+.list-head .align-right { text-align: right; }
+.list-container { overflow-y: auto; scrollbar-gutter: stable; }
+.list-head { position: sticky; top: 0; z-index: 1; }
+.list-body { flex: 1; min-height: 0; }
+.row { width: 100%; min-height: 72px; border: 0; border-bottom: 1px solid var(--line); border-left: 3px solid transparent; padding-left: 17px; background: var(--bg); color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.row:nth-child(even) { background: #151e29; }
+.row:hover { background: var(--hover); border-left-color: var(--accent); }
+.row:focus-visible { outline-offset: -3px; background: var(--hover); }
+.col-main { min-width: 0; }
+.method-tag { display: inline-block; color: #d6c4ff; background: #2d263e; border: 1px solid #6e5b91; border-radius: 4px; padding: 3px 6px; font-family: var(--mono); font-size: 12px; font-weight: 700; }
+.method-tag[data-method='GET'] { color: var(--accent); background: #203247; border-color: #577ba3; }
+.method-tag[data-method='POST'] { color: var(--success); background: #1d352d; border-color: #507f68; }
+.method-tag[data-method='PUT'], .method-tag[data-method='PATCH'] { color: var(--warning); background: #352d20; border-color: #8a724c; }
+.method-tag[data-method='DELETE'] { color: var(--danger); background: #34242e; border-color: #93616e; }
+.primary-text { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 600; margin-bottom: 3px; }
+.secondary-text { display: block; color: var(--muted); font-family: var(--mono); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.col-status { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.status-num { color: var(--muted); font-family: var(--mono); font-size: 14px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.status-num[data-status^='2'] { color: var(--success); }
+.status-num[data-status^='3'] { color: var(--accent); }
+.status-num[data-status^='4'] { color: var(--warning); }
+.status-num[data-status^='5'] { color: var(--danger); }
+.status-label { color: var(--muted); font-size: 12px; }
+.time-text { color: var(--muted); font-family: var(--mono); font-size: 13px; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.detail-toolbar { padding: 12px 20px; background: var(--surface); border-bottom: 1px solid var(--line); }
+.detail-scroll { flex: 1; min-height: 0; overflow-y: auto; padding: 24px 20px; }
+section { margin-bottom: 24px; }
+.label { display: flex; gap: 10px; align-items: center; margin: 0 0 10px; color: var(--text); font-size: 14px; font-weight: 600; }
+.section-meta { color: var(--muted); font-size: 12px; font-weight: 400; }
+.endpoint-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-bottom: 12px; }
+.endpoint-meta .col-status { flex-direction: row; align-items: baseline; gap: 8px; }
+.url-display { color: var(--accent); font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; }
+.code-container { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 16px; overflow-x: auto; }
+.code-container pre { margin: 0; }
+code { color: #d6c4ff; font-family: var(--mono); font-size: 14px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cookie-list { border: 1px solid var(--line); border-radius: 8px; background: var(--surface); overflow: hidden; }
+.cookie-item { display: grid; grid-template-columns: minmax(100px, 180px) minmax(0, 1fr); gap: 16px; padding: 12px 16px; font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; }
+.cookie-item + .cookie-item { border-top: 1px solid var(--line); }
+.cookie-name { color: var(--text); font-weight: 600; }
+.cookie-value { color: var(--muted); }
+.no-data { color: var(--muted); padding: 16px; font-size: 14px; }
+.empty-msg { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 64px 24px; text-align: center; color: var(--muted); }
+.empty-title { color: var(--text); font-size: 16px; font-weight: 600; }
+.code-container.tree-mode {
+  --json-tree-font-family: var(--mono); --json-tree-font-size: 14px; --json-tree-li-line-height: 1.65; --json-tree-li-indentation: 1.35em;
+  --json-tree-property-color: #edf2f7; --json-tree-label-color: #aab8c8;
+  --json-tree-arrow-color: #aab8c8; --json-tree-operator-color: #aab8c8; --json-tree-internal-color: #aab8c8;
+  --json-tree-string-color: #a7dfb5; --json-tree-number-color: #96c8ff; --json-tree-boolean-color: #d6c4ff;
+  --json-tree-null-color: #ffd38a; --json-tree-undefined-color: #ffd38a;
+}
+@media (max-width: 600px) {
+  .header { padding: 12px; gap: 10px; }
+  .list-head, .row { grid-template-columns: 60px minmax(0, 1fr) 66px 64px; gap: 10px; padding-right: 12px; }
+  .list-head { padding-left: 12px; }
+  .row { padding-left: 9px; }
+  .status-label { display: none; }
+  .endpoint-meta .status-label { display: inline; }
+  .detail-scroll { padding: 20px 12px; }
+  .detail-toolbar { padding: 12px; }
+  .cookie-item { grid-template-columns: 1fr; gap: 4px; }
+}
+@media (max-width: 380px) {
+  .list-head, .row { grid-template-columns: 52px minmax(0, 1fr) 42px 58px; gap: 6px; }
+  .method-tag { font-size: 11px; padding: 3px 4px; }
+}
 </style>

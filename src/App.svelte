@@ -5,6 +5,26 @@
 
   let apis = $state([]);
   let selected = $state(null);
+  let selectedMethods = $state([]);
+  const commonMethods = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'];
+  const methodCounts = $derived.by(() => {
+    const counts = new Map();
+    for (const api of apis) counts.set(api.method, (counts.get(api.method) || 0) + 1);
+    return counts;
+  });
+  const filterMethods = $derived([
+    ...commonMethods,
+    ...[...methodCounts.keys()].filter(method => !commonMethods.includes(method)).sort()
+  ]);
+  const visibleApis = $derived(selectedMethods.length
+    ? apis.filter(api => selectedMethods.includes(api.method))
+    : apis);
+
+  function toggleMethod(method) {
+    selectedMethods = selectedMethods.includes(method)
+      ? selectedMethods.filter(value => value !== method)
+      : [...selectedMethods, method];
+  }
   let cookieResult = $state({ cookies: [], state: 'ready', error: '' });
   let monitor;
   const chromeApi = typeof chrome === 'undefined' ? undefined : chrome;
@@ -77,7 +97,7 @@
   <header class="header">
     <div class="header-left">
       <span class="title">J-Spy</span>
-      <span class="count">{apis.length} items</span>
+      <span class="count">{selectedMethods.length ? visibleApis.length + ' / ' + apis.length : apis.length} items</span>
       {#if isPreview}<span class="preview-badge">SAMPLE DATA</span>{/if}
     </div>
     <div class="header-actions">
@@ -88,12 +108,28 @@
 
   <main class="content">
     {#if !selected}
+      <div class="filter-bar">
+        <div class="filter-title">Method <span class="filter-hint">Select one or more</span></div>
+        <div class="method-filters" role="group" aria-label="HTTP method filters">
+          <button class="filter-btn" class:filter-active={selectedMethods.length === 0}
+            aria-pressed={selectedMethods.length === 0} onclick={() => selectedMethods = []}>
+            All <span class="filter-count">{apis.length}</span>
+          </button>
+          {#each filterMethods as method (method)}
+            <button class="filter-btn" class:filter-active={selectedMethods.includes(method)}
+              aria-pressed={selectedMethods.includes(method)} onclick={() => toggleMethod(method)}>
+              <span class="filter-check" aria-hidden="true">{selectedMethods.includes(method) ? '✓' : ''}</span>
+              {method} <span class="filter-count">{methodCounts.get(method) || 0}</span>
+            </button>
+          {/each}
+        </div>
+      </div>
       <div class="list-container">
         <div class="list-head" aria-hidden="true">
           <span>Method</span><span>Endpoint</span><span>Status</span><span class="align-right">Time</span>
         </div>
         <div class="list-body">
-          {#each apis as api (api.id)}
+          {#each visibleApis as api (api.id)}
             <button class="row" onclick={() => showDetail(api)}>
               <div class="col-method">
                 <span class="method-tag" data-method={api.method}>{api.method}</span>
@@ -110,8 +146,13 @@
             </button>
           {:else}
             <div class="empty-msg">
-              <span class="empty-title">No JSON requests yet</span>
-              <span>{isPreview ? 'Use Reset Samples to restore the preview.' : 'Reload the page or perform an action to capture JSON requests.'}</span>
+              <span class="empty-title">{apis.length ? 'No matching requests' : 'No JSON requests yet'}</span>
+              {#if apis.length}
+                <span>No captured requests use {selectedMethods.join(' or ')}.</span>
+                <button class="clear-btn" onclick={() => selectedMethods = []}>Show all methods</button>
+              {:else}
+                <span>{isPreview ? 'Use Reset Samples to restore the preview.' : 'Reload the page or perform an action to capture JSON requests.'}</span>
+              {/if}
             </div>
           {/each}
         </div>
@@ -194,6 +235,16 @@
 button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 .content, .list-container, .detail-view { display: flex; flex-direction: column; min-height: 0; flex: 1; }
 .content { overflow: hidden; }
+.filter-bar { flex-shrink: 0; padding: 12px 20px; background: var(--bg); border-bottom: 1px solid var(--line); }
+.filter-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; margin-bottom: 8px; font-size: 13px; font-weight: 600; }
+.filter-hint { color: var(--muted); font-size: 12px; font-weight: 400; }
+.method-filters { display: flex; flex-wrap: wrap; gap: 8px; }
+.filter-btn { display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 6px 10px; border: 1px solid #687d94; border-radius: 6px; color: var(--muted); background: var(--surface); font: inherit; font-size: 12px; font-weight: 600; cursor: pointer; }
+.filter-btn:hover { color: var(--text); background: var(--hover); border-color: var(--accent); }
+.filter-btn.filter-active { color: var(--accent); background: #203247; border-color: var(--accent); }
+.filter-check { width: 10px; font-size: 12px; }
+.filter-count { font-variant-numeric: tabular-nums; font-weight: 400; }
+
 .list-head, .row { display: grid; grid-template-columns: 72px minmax(0, 1fr) 132px 84px; align-items: center; gap: 16px; padding: 12px 20px; }
 .list-head { flex-shrink: 0; color: var(--muted); background: var(--surface); font-size: 12px; font-weight: 600; border-bottom: 1px solid var(--line); }
 .list-head .align-right { text-align: right; }
@@ -248,6 +299,7 @@ code { color: #d6c4ff; font-family: var(--mono); font-size: 14px; line-height: 1
 }
 @media (max-width: 600px) {
   .header { padding: 12px; gap: 10px; }
+  .filter-bar { padding: 12px; }
   .list-head, .row { grid-template-columns: 60px minmax(0, 1fr) 66px 64px; gap: 10px; padding-right: 12px; }
   .list-head { padding-left: 12px; }
   .row { padding-left: 9px; }

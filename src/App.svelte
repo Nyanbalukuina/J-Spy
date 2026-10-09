@@ -175,6 +175,34 @@
           </section>
 
           <section>
+            <h2 class="label">Payload <span class="section-meta">{selected.payload?.mimeType || 'Request data'}</span></h2>
+            {#if selected.payload?.query.length}
+              <h3 class="payload-label">Query String Parameters</h3>
+              <div class="cookie-list">
+                {#each selected.payload.query as param}
+                  <div class="cookie-item"><span class="cookie-name">{param.name}</span><span class="cookie-value">{param.value}</span></div>
+                {/each}
+              </div>
+            {/if}
+            <h3 class="payload-label">{selected.payload?.kind === 'form' ? 'Form Data' : 'Request Payload'}</h3>
+            <div class="code-container tree-mode">
+              {#if !selected.payload || selected.payload.kind === 'empty'}
+                <div class="no-data">No request body.</div>
+              {:else if selected.payload.kind === 'unavailable'}
+                <div class="no-data">Request body is unavailable from DevTools.</div>
+              {:else if selected.payload.kind === 'form'}
+                {#each selected.payload.params as param}
+                  <div class="cookie-item"><span class="cookie-name">{param.name}</span><span class="cookie-value">{param.fileName !== undefined ? 'File: ' + param.fileName : param.value}</span></div>
+                {/each}
+              {:else if selected.payload.kind === 'json' && typeof selected.payload.body === 'object' && selected.payload.body !== null}
+                <JSONTree value={selected.payload.body} defaultExpandedLevel={1} />
+              {:else}
+                <pre><code>{selected.payload.kind === 'json' ? JSON.stringify(selected.payload.body) : selected.payload.body}</code></pre>
+              {/if}
+            </div>
+          </section>
+
+          <section>
             <h2 class="label">Response body <span class="section-meta">JSON</span></h2>
             <div class="code-container tree-mode">
               {#if selected.bodyState === 'loading'}
@@ -276,6 +304,7 @@ button:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
 section { margin-bottom: 24px; }
 .label { display: flex; gap: 10px; align-items: center; margin: 0 0 10px; color: var(--text); font-size: 14px; font-weight: 600; }
 .section-meta { color: var(--muted); font-size: 12px; font-weight: 400; }
+.payload-label { color: var(--muted); font-size: 12px; font-weight: 500; margin: 12px 0 8px; }
 .endpoint-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-bottom: 12px; }
 .endpoint-meta .col-status { flex-direction: row; align-items: baseline; gap: 8px; }
 .url-display { color: var(--accent); font-family: var(--mono); font-size: 13px; overflow-wrap: anywhere; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; }

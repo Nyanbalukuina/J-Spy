@@ -19,6 +19,32 @@ export function parseResponse(content, encoding = '') {
   return { body, bodyState: 'ready' };
 }
 
+export function parseRequestPayload(request) {
+  let query = [];
+  try { query = [...new URL(request.url).searchParams].map(([name, value]) => ({ name, value })); } catch { /* A malformed URL must not interrupt capture. */ }
+  const postData = request.postData;
+  const payload = { query, mimeType: postData?.mimeType || '', kind: 'empty', body: null, params: [] };
+  if (!postData) return payload;
+  const mimeType = payload.mimeType.split(';')[0].trim().toLowerCase();
+  if (mimeType === 'application/x-www-form-urlencoded' || mimeType === 'multipart/form-data') {
+    payload.params = postData.params?.length
+      ? postData.params.map(param => ({ name: param.name, value: param.value ?? '', fileName: param.fileName }))
+      : mimeType === 'application/x-www-form-urlencoded' && typeof postData.text === 'string'
+        ? [...new URLSearchParams(postData.text)].map(([name, value]) => ({ name, value })) : [];
+    if (payload.params.length) { payload.kind = 'form'; return payload; }
+  }
+  if (typeof postData.text === 'string') {
+    payload.body = postData.text;
+    payload.kind = 'text';
+    if (mimeType === 'application/json' || mimeType.endsWith('+json')) {
+      try { payload.body = JSON.parse(postData.text); payload.kind = 'json'; } catch { /* Preserve raw text. */ }
+    }
+  } else {
+    payload.kind = 'unavailable';
+  }
+  return payload;
+}
+
 export function createNetworkMonitor(chromeApi, onEntry, onBody) {
   let generation = 0;
   const event = chromeApi?.devtools?.network?.onRequestFinished;
@@ -27,7 +53,8 @@ export function createNetworkMonitor(chromeApi, onEntry, onBody) {
     const entry = {
       id: crypto.randomUUID(), url: request.request.url,
       method: request.request.method, status: request.response.status,
-      time: Math.round(request.time), body: null, bodyState: 'loading'
+      time: Math.round(request.time), body: null, bodyState: 'loading',
+      payload: parseRequestPayload(request.request)
     };
     const currentGeneration = generation;
     // Add first, even when getContent invokes its callback synchronously.

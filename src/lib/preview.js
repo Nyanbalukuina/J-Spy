@@ -1,3 +1,5 @@
+import { parseRequestPayload } from './monitor.js';
+
 // Fictional fixtures, loaded only by the Vite development server.
 export function createPreviewEntries() {
   const cookies = [
@@ -29,6 +31,13 @@ export function createPreviewEntries() {
     id: 'preview-' + index,
     url: 'https://api.example.test' + endpoint,
     method, status, time, body, bodyState,
+    payload: parseRequestPayload({
+      url: 'https://api.example.test' + endpoint,
+      postData: index === 1 ? { mimeType: 'application/json', text: JSON.stringify({ items: [{ sku: 'BOOK-01', quantity: 2 }], currency: 'JPY' }) }
+        : index === 3 ? { mimeType: 'application/json', text: JSON.stringify({ theme: 'dark', notifications: false }) }
+        : index === 6 ? { mimeType: 'application/x-www-form-urlencoded', text: 'email=demo%40example.test&password=sample-only' }
+        : undefined
+    }),
     bodyError: bodyState === 'error' ? 'Sample response is unavailable.' : '',
     previewCookies: index === 7 ? [] : cookies.map(cookie => ({ ...cookie }))
   }));
